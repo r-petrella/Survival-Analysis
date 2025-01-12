@@ -1,0 +1,401 @@
+---
+title: "Data science applications - NAFLD"
+author: "Agosteo, Palmiotto, Fabbri, Petrella"
+date: "2023-05-22"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+# Libraries used for this project
+```{r}
+library(corrplot)
+library(ggplot2)
+library(gridExtra)
+library(survival)
+library(survminer)
+library(mfp)
+library(flexsurv)
+library(DescTools)
+```
+
+Here below we upload the dataset from the package. We notice that there are a lot of missing observations, therefore we remove them from the dataframe.
+```{r}
+data(nafld, package="survival")
+nafld <- nafld1
+print(dim(nafld))
+nafld <- na.omit(nafld)
+print(dim(nafld))
+
+head(nafld)
+```
+
+Next we define a dataframe without binary variables, so that we can use it to show the correlation structure.
+```{r}
+# corr df will be used for the visual analysis on correlation
+corr_df = nafld[c(-1, -7)]
+corr_df$status = factor(corr_df$status)
+corr_df$male = factor(corr_df$male)
+```
+
+
+
+## PRELIMINARY ANALYSIS
+
+# Empirical distributions
+
+```{r}
+# Create a vector of variable names to be plotted
+var_names <- names(corr_df)
+
+# Create a list to store the plots
+plots <- list()
+
+# Loop through each variable
+for (var in var_names) {
+  # Check if the variable is numeric or factor
+  if (is.numeric(corr_df[[var]])) {
+    # Create a histogram for numeric variables
+    p <- ggplot(corr_df, aes_string(x = var)) +
+         geom_histogram(binwidth = 2) +
+         labs(title = var, x = var, y = "Frequency") +
+         theme_bw()
+    # Add the plot to the list
+    plots[[length(plots) + 1]] <- p
+  } else if (is.factor(corr_df[[var]])) {
+    # Create a bar chart for factor variables
+    p <- ggplot(corr_df, aes_string(x = var)) +
+         geom_bar() +
+         labs(title = var, x = var, y = "Frequency") +
+         theme_bw()
+    # Add the plot to the list
+    plots[[length(plots) + 1]] <- p
+  }
+}
+
+# Combine the plots into a single figure
+grid.arrange(grobs = plots, ncol = 3)
+summary(corr_df[c(-6,-7)])
+```
+
+The plots above represent the empirical distribution of our data. We
+notice that age seems to be centered at around 55 with a steadily
+increasing concentration towards the mean, while height seems to
+approximate a normal distribution. Weight and BMI, on the other hand,
+appear to be positively skewed, showing a heavier tail on the right
+side, while male (1 if male, 0 if female) looks slightly unbalanced,
+showing a higher number of female individuals in the study. "futime"
+represents the time to death and its density slowly decreases with a
+strong tail on the right.
+
+## Checking the correlation structure
+Here we plotted the dataset's correlation matrix. We noticed a high
+correlation between weight and BMI. This is expected, since weight,
+along with height, are used to compute BMI. To avoid any issues such as
+collinearity, we choose to not include weight in any of the models. We exclude height as well, since it's related to BMI even though they're not linearly correlated.
+
+```{r}
+# Calculate the correlation matrix
+corr_df[] <- lapply(corr_df, as.numeric)
+cor_matrix <- cor(corr_df)
+
+# Generate a correlation plot with adjusted margin
+corrplot(cor_matrix, method = "color", type = "lower",
+         title = "Correlation Matrix of Variables",
+         tl.col = "black", tl.srt = 45, mar=c(0, 0, 3, 0))
+
+
+
+```
+
+We also divide the quantitative variables into classes. The cutoff points have been selected manually: we refrained from using quantiles since we wanted to avoid weird cutoffs. 
+In other cases, such as BMI, we choose to split it according to the WHO indications:
+\n
+- Underweight: BMI below 18.5 \n
+- Normal weight: BMI between 18.5 and 24.9 \n
+- Overweight: BMI between 25 and 29.9 \n 
+- Class 1 obesity: BMI between 30 and 34.9 \n 
+- Class 2 obesity: BMI between 35 and 39.9 \n
+- Class 3 obesity: BMI of 40 or higher \n
+
+```{r}
+nafld$agecl <- cut(nafld$age, breaks = c(0, 30, 45, 60, 75, Inf),
+             labels = c("0<=-30", "30<=-45", "45<=-60", "60<=-75",">=75"),
+             right=F, include.lowest=T)
+
+bmi_breaks <- c(0,18.5, 25, 30, 35, 40, Inf)
+nafld$bmicl <- cut(nafld$bmi, breaks = bmi_breaks, 
+             labels = c("Underweight", "Normal weight", "Overweight",
+                        "Class 1 obesity","Class 2 obesity", "Class 3 obesity"))
+```
+
+
+
+## KAPLAN-MEIER
+
+Next we estimate the survival functions using the Kaplan-Meier estimator.
+```{r}
+attach(nafld)
+
+# Create the survival data object
+surv_obj <- Surv(futime,status)
+
+# General survival function S(t) with Kaplan-Meier
+
+result_KM <- survfit(surv_obj~1)
+plot(result_KM, xlab="Days", ylab="Estimated S(t)")
+
+
+# Survival functions for gender
+surv_male = Surv(futime, status)
+km_male = survfit(surv_male ~ male)
+ggsurvplot(km_male,  conf.int = TRUE, xlab = "days", ylab = " survival probability GENDER",data=nafld)
+
+# Survival function for age
+surv_agecl <- survfit((surv_obj) ~ agecl)
+ggsurvplot(surv_agecl,  conf.int = TRUE, xlab = "days", ylab = " survival probability AGE",data=nafld)
+
+# Survival function for bmi
+surv_bmicl <- survfit((surv_obj) ~ bmicl)
+ggsurvplot(surv_bmicl,  conf.int = TRUE, xlab = "days", ylab = "survival probability BMI",data=nafld)
+
+
+detach(nafld)
+```
+
+The survival curves seem to be well differentiated for age and the underweight class for bmi, nevertheless we check this condition using the log-rank test and the Wilcoxon test. Both tests have different strengths. The log-rank tends to be more powerful when the hazards are proportional. It also gives equal weight to all events, regardless of when they occur. This makes it sensitive to differences in survival probabilities later in time. Wilcoxon, on the other hand, performs better when the hazards are not proportional; moreover, Wilcoxon assigns a greater weight to earlier observations.
+As we can see from the results below, both tests show that the survival curves are significantly different.
+
+```{r}
+attach(nafld)
+# Breslow tests (Wilcoxon test)
+survdiff(surv_obj ~ agecl, rho=1)
+survdiff(surv_obj ~ male, rho=1)
+survdiff(surv_obj ~ bmicl, rho=1)
+detach(nafld)
+```
+
+```{r}
+attach(nafld)
+# Log rank tests
+survdiff(surv_obj ~ agecl)
+survdiff(surv_obj ~ male)
+survdiff(surv_obj ~ bmicl)
+detach(nafld)
+```
+
+
+
+## COX PROPORTIONAL HAZARDS
+Here below we fit a Cox proportional hazards model using all the available predictors. Since we eliminated weight, we don't seem to have any issues with the coefficients' estimates, as they are all significant and have reasonable signs.
+```{r}
+surv_obj = Surv(nafld$futime, nafld$status)
+cox_complete <- coxph(surv_obj ~ age + male + bmi,
+                      data = nafld)
+```
+
+
+## PLOTTING THE COX MODEL
+```{r}
+surv_fit <- survfit(cox_complete)
+
+km_fit <- survfit(surv_obj ~ 1, data = nafld)
+
+plot(surv_fit, xlab = "Time", ylab = "Survival Probability", 
+     main = "Survival Curve (Cox vs Kaplan-Meier)",
+     col = "red")
+lines(km_fit, col = "black")  
+legend("bottomleft", legend = c("Cox Model", "Kaplan-Meier"), col = c("red", "black"), lty = 1)
+
+km_cum_hazard <- -log(km_fit$surv)
+km_cum_hazard_lower <- -log(km_fit$surv + 1.96 * km_fit$std.err)
+km_cum_hazard_upper <- -log(km_fit$surv - 1.96 * km_fit$std.err)
+plot(km_fit$time, km_cum_hazard, type = "s", xlab = "Time", ylab = "Cumulative Hazard",
+     main = "Cumulative Hazard Function (Cox vs Kaplan-Meier)")
+lines(km_fit$time, km_cum_hazard_lower, lty = 2, col = "black")
+lines(km_fit$time, km_cum_hazard_upper, lty = 2, col = "black")
+legend("topleft", legend = c("Cox Model", "Kaplan-Meier"), col = c("red", "black"), lty = 1)
+
+cox_cum_hazard <- -log(surv_fit$surv)
+cox_cum_hazard_lower <- -log(surv_fit$surv + 1.96 * surv_fit$std.err)
+cox_cum_hazard_upper <- -log(surv_fit$surv - 1.96 * surv_fit$std.err)
+lines(surv_fit$time, cox_cum_hazard, col = "red")
+lines(surv_fit$time, cox_cum_hazard_lower, lty = 2, col = "red")
+lines(surv_fit$time, cox_cum_hazard_upper, lty = 2, col = "red")
+
+
+```
+
+We can see that with respect to the Kaplan-Meier estimate, the cox regression overestimates the survival function and underestimates the hazards.
+
+
+## TESTING THE PROPORTIONAL HAZARDS ASSUMPTION FOR OUR COX MODEL
+
+Firstly, we plot the log-log functions for the classes of the variables. Even if we used the variables in their quantitative form, this helps up in checking if the proportional hazards assumption is respected.
+
+```{r}
+attach(nafld)
+
+surv_agecl <- survfit(surv_obj ~ agecl)
+surv_bmicl <- survfit(surv_obj ~ bmicl)
+surv_male <- survfit(surv_obj ~ male)
+
+
+# Plot of log-minus-log function
+plot(surv_agecl, fun = "cloglog", yscale = -1, col = 1:5, main = "log-log for AGE",
+     xlab = "Days", ylab = "Estimated log-log function")
+legend("topright", title = "Age", legend = levels(agecl), col = 1:5, lty = 1,
+       x.intersp = 0.8, y.intersp = 1.2, bg = "white")
+
+plot(surv_bmicl, fun = "cloglog", yscale = -1, col = 1:5, main = "log-log for BMI",
+     xlab = "Days", ylab = "Estimated log-log function")
+legend("topright", title = "BMI", legend = levels(bmicl), col = 1:5, lty = 1,
+       x.intersp = 0.8, y.intersp = 1.2, bg = "white")
+
+plot(surv_male, fun = "cloglog", yscale = -1, col = 1:5, main = "log-log for MALE",
+     xlab = "Days", ylab = "Estimated log-log function")
+legend("topright", title = "BMI", legend = levels(as.factor(male)), col = 1:5, lty = 1,
+       x.intersp = 0.8, y.intersp = 1.2, bg = "white")
+
+
+detach(nafld)
+```
+
+Next we compute the schoenfeld residuals and plot them with respect to the covariates. Additionally to the plots we also use the cox.zph to test the hypothesis that the hazards are proportional.
+
+```{r}
+ph_test_km <- cox.zph(cox_complete, terms=FALSE, transform="km")
+ph_test_rank <- cox.zph(cox_complete, terms=FALSE, transform="rank")
+ph_test_id <- cox.zph(cox_complete, terms=FALSE, transform="identity")
+ph_test_log <- cox.zph(cox_complete, terms=FALSE, transform="log")
+
+ph_test_km
+ph_test_rank
+ph_test_id
+ph_test_log
+
+plot(ph_test_km, main = "KM transform")
+plot(ph_test_rank, main = "RANK transform")
+plot(ph_test_id, main = "IDENTITY transform")
+plot(ph_test_log, main = "LOG transform")
+```
+
+
+From the plots and the non-significant p-values, we do not reject the PH assumption.
+
+## TESTING THE LINEARITY ASSUMPTION
+Finally we test the linearity assumption by plotting the martingale residuals against the covariates. "male" is excluded since it's a binary variable
+```{r}
+attach(nafld)
+mart_res <- residuals(cox_complete, type="martingale")
+
+scatter.smooth(mart_res ~ nafld$age)
+scatter.smooth(mart_res ~ nafld$bmi)
+detach(nafld)
+```
+Graphically speaking, there is no clear evidence of non-linearity.
+
+In order to obtain more accurate information, we now test the linearity hypothesis through the mfp function. We leave the default option select=1 so that no variable selection would be performed.
+
+
+```{r}
+cox_mfp <- mfp(surv_obj ~ fp(age)+male+fp(bmi), family=cox, method="breslow", verbose=T,data=nafld)
+cox_mfp
+cox_mfp$pvalues
+```
+
+
+From the output, we observe that:
+
+1) In the final model, age and bmi have 2 and 4 degrees of freedom respectively, meaning that a linear form of such covariates is less preferable than another form with which the model fitting is better.
+
+2) In the case of age, df=2 means that age is transformed into a power of (scled) age; specifically age is transformed into (age/100)^2 (scale=100 and power=2). We also remark that the reduction in the deviance residuals from df=2 to df=4 is negligible. 
+
+3) In the case of bmi, df=4 means that bmi is transformed into the sum of two functions of the (scaled) bmi. Since we have power1=-0.5, power2=0 refers to the logarithm and scale=10, bmi is transformed into (bmi/10)^(-1/2) + ln(bmi/10).
+
+
+# PARAMETRIC MODELS
+We also try to fit a series of parametric models with and without covariates.
+```{r}
+attach(nafld)
+mod_expPH <- flexsurvreg(surv_obj ~ age+male+bmi, dist="exp")
+mod_wei <- flexsurvreg(surv_obj ~ age+male+bmi, dist="weibull")
+mod_lnr <- flexsurvreg(surv_obj ~ age+male+bmi, dist="lnorm")
+mod_llg <- flexsurvreg(surv_obj ~ age+male+bmi, dist="llogis")
+
+AIC_vec = AIC(mod_expPH,mod_wei,mod_lnr,mod_llg)
+BIC_vec = BIC(mod_expPH,mod_wei,mod_lnr,mod_llg)
+
+plot(mod_expPH, main = "EXPONENTIAL")
+plot(mod_expPH,type="hazard", main = "EXPONENTIAL")
+plot(mod_expPH,type="cumhaz", main = "EXPONENTIAL")
+
+plot(mod_wei, main = "WEIBULL")
+plot(mod_wei,type="hazard", main = "WEIBULL")
+plot(mod_wei,type="cumhaz", main = "WEIBULL")
+
+plot(mod_lnr, main = "LOG-NORMAL")
+plot(mod_lnr,type="hazard", main = "LOG-NORMAL")
+plot(mod_lnr,type="cumhaz", main = "LOG-NORMAL")
+
+plot(mod_llg, main = "LOG-LOGISTIC")
+plot(mod_llg,type="hazard", main = "LOG-LOGISTIC")
+plot(mod_llg,type="cumhaz", main = "LOG-LOGISTIC")
+
+lowest_row_name <- rownames(AIC_vec)[which.min(AIC_vec$AIC)]
+AIC_vec
+print(lowest_row_name)
+
+lowest_row_name2 <- rownames(BIC_vec)[which.min(BIC_vec$BIC)]
+BIC_vec
+print(lowest_row_name2)
+
+detach(nafld)
+```
+
+```{r}
+attach(nafld)
+mod_expPH <- flexsurvreg(surv_obj ~ 1, dist="exp")
+mod_wei <- flexsurvreg(surv_obj ~ 1, dist="weibull")
+mod_lnr <- flexsurvreg(surv_obj ~ 1, dist="lnorm")
+mod_llg <- flexsurvreg(surv_obj ~ 1, dist="llogis")
+
+AIC_vec = AIC(mod_expPH,mod_wei,mod_lnr,mod_llg)
+BIC_vec = BIC(mod_expPH,mod_wei,mod_lnr,mod_llg)
+
+plot(mod_expPH, main = "EXPONENTIAL")
+plot(mod_expPH,type="hazard", main = "EXPONENTIAL")
+plot(mod_expPH,type="cumhaz", main = "EXPONENTIAL")
+
+plot(mod_wei, main = "WEIBULL")
+plot(mod_wei,type="hazard", main = "WEIBULL")
+plot(mod_wei,type="cumhaz", main = "WEIBULL")
+
+plot(mod_lnr, main = "LOG-NORMAL")
+plot(mod_lnr,type="hazard", main = "LOG-NORMAL")
+plot(mod_lnr,type="cumhaz", main = "LOG-NORMAL")
+
+plot(mod_llg, main = "LOG-LOGISTIC")
+plot(mod_llg,type="hazard", main = "LOG-LOGISTIC")
+plot(mod_llg,type="cumhaz", main = "LOG-LOGISTIC")
+
+lowest_row_name <- rownames(AIC_vec)[which.min(AIC_vec$AIC)]
+AIC_vec
+print(lowest_row_name)
+
+lowest_row_name2 <- rownames(BIC_vec)[which.min(BIC_vec$BIC)]
+BIC_vec
+print(lowest_row_name2)
+
+detach(nafld)
+```
+
+
+
+
+
+
